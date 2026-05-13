@@ -2,6 +2,7 @@ const { v4: uuidv4 } = require('uuid');
 const { prisma } = require('../config/database');
 const { NotFoundError, ValidationError, ForbiddenError } = require('../errors/AppError');
 const { buildPaginationArgs, buildPaginationMeta } = require('../utils/pagination');
+const { queueOrderConfirmationEmail } = require('../workers/email.worker');
 
 /**
  * Place an order from the customer's active cart.
@@ -111,6 +112,10 @@ async function placeOrder(userId, { tenantId, shippingAddress }) {
 
     return newOrder;
   });
+
+  // Send order confirmation email (async, non-blocking)
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+  if (user) await queueOrderConfirmationEmail(user.email, order);
 
   return order;
 }

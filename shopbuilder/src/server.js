@@ -6,7 +6,6 @@ const env = require('./config/env');
 const PORT = env.PORT || 3000;
 
 async function start() {
-  await redis.connect();
   await connectDB();
 
   const server = app.listen(PORT, () => {

@@ -8,6 +8,8 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().default('15m'),
   JWT_REFRESH_EXPIRES_IN: z.string().default('7d'),
   MOCK_PAYMENT_SECRET: z.string().min(8),
+  RESEND_API_KEY: z.string().min(1),
+  APP_URL: z.string().default('http://localhost:3000'),
   PORT: z.string().default('3000'),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 });

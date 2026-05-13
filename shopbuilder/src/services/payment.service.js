@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const { prisma } = require('../config/database');
 const { ConflictError, NotFoundError } = require('../errors/AppError');
+const { queuePaymentReceiptEmail } = require('../workers/email.worker');
 
 /**
  * Mock payment processor.
@@ -74,6 +75,16 @@ async function processPayment({ orderId, amount, method, idempotencyKey, userId 
 
     return payment;
   });
+
+  // Send payment receipt email for successful payments (async, non-blocking)
+  if (paymentStatus === 'PAID') {
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    const fullOrder = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { items: { include: { variant: true } } },
+    });
+    if (user && fullOrder) await queuePaymentReceiptEmail(user.email, fullOrder, result);
+  }
 
   return {
     paymentId: result.id,

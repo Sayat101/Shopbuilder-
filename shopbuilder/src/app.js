@@ -10,8 +10,11 @@ const authRoutes    = require('./routes/auth.routes');
 const tenantRoutes  = require('./routes/tenant.routes');
 const productRoutes = require('./routes/product.routes');
 const paymentRoutes = require('./routes/payment.routes');
-const cartRoutes    = require('./routes/cart.routes');    // NEW
-const orderRoutes   = require('./routes/order.routes');   // NEW
+const cartRoutes    = require('./routes/cart.routes');
+const orderRoutes   = require('./routes/order.routes');
+
+// Start background workers
+require('./workers/email.worker');
 
 const app = express();
 

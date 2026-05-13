@@ -5,11 +5,11 @@ const { requireRole } = require('../middleware/rbac');
 
 const router = Router();
 
-// FIXED: MERCHANT can create their own store (was SUPER_ADMIN only — that was a bug)
-// SUPER_ADMIN can also create stores on behalf of others
-router.post('/', authenticate, requireRole(['MERCHANT', 'SUPER_ADMIN']), tenantController.create);
+// Only SUPER_ADMIN can manually create/manage tenants
+// Merchants get their tenant auto-created during registration
+router.post('/', authenticate, requireRole(['SUPER_ADMIN']), tenantController.create);
 
-// MERCHANT can list/view their own tenants; SUPER_ADMIN sees all
+// MERCHANT can view their own tenant; SUPER_ADMIN sees all
 router.get('/', authenticate, requireRole(['MERCHANT', 'SUPER_ADMIN']), tenantController.list);
 router.get('/:id', authenticate, requireRole(['MERCHANT', 'SUPER_ADMIN']), tenantController.getOne);
 

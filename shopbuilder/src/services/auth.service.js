@@ -4,7 +4,8 @@ const { v4: uuidv4 } = require('uuid');
 const { prisma } = require('../config/database');
 const redis = require('../config/redis');
 const env = require('../config/env');
-const { ConflictError, UnauthorizedError, NotFoundError } = require('../errors/AppError');
+const { ConflictError, UnauthorizedError, NotFoundError, ValidationError } = require('../errors/AppError');
+const { queueVerificationEmail, queuePasswordResetEmail } = require('../workers/email.worker');
 
 const SALT_ROUNDS = 12;
 
@@ -27,34 +28,72 @@ function generateTokens(user) {
   return { accessToken, refreshToken };
 }
 
-async function register({ email, password, role, tenantId }) {
-  // Check email uniqueness
+async function register({ email, password, role, subdomain }) {
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) throw new ConflictError('Email already registered');
 
-  // Password strength: min 8 chars
   if (password.length < 8) {
-    throw new Error('Password must be at least 8 characters');
+    throw new ValidationError('Password must be at least 8 characters');
   }
 
   const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+  const userRole = role || 'CUSTOMER';
+  let tenantId = 'platform';
+
+  // MERCHANT: auto-create tenant on registration
+  if (userRole === 'MERCHANT') {
+    if (!subdomain) throw new ValidationError('subdomain is required for MERCHANT registration');
+
+    const existingTenant = await prisma.tenant.findUnique({ where: { subdomain } });
+    if (existingTenant) throw new ConflictError('Subdomain already taken');
+
+    const schemaName = `tenant_${subdomain.replace(/[^a-z0-9]/g, '_')}`;
+    const tenant = await prisma.tenant.create({
+      data: { subdomain, schemaName, plan: 'BASIC', status: 'ACTIVE' },
+    });
+
+    await prisma.warehouseLocation.create({
+      data: { name: 'Main Warehouse', city: 'Almaty', tenantId: tenant.id },
+    });
+
+    tenantId = tenant.id;
+  }
 
   const user = await prisma.user.create({
     data: {
       email,
       passwordHash,
-      role: role || 'CUSTOMER',
-      tenantId: tenantId || 'platform',
+      role: userRole,
+      tenantId,
+      emailVerified: false,
     },
     select: { id: true, email: true, role: true, tenantId: true, createdAt: true },
   });
 
-  const { accessToken, refreshToken } = generateTokens(user);
+  // Generate verification token (24 hours)
+  const verifyToken = uuidv4();
+  await redis.setex(`verify:${verifyToken}`, 24 * 60 * 60, user.id);
+  const saved = await redis.get(`verify:${verifyToken}`);
+console.log('✅ REDIS CHECK - token saved:', saved ? 'YES' : 'NO', verifyToken);
 
-  // Store refresh token in Redis (7 days)
-  await redis.setex(`refresh:${user.id}`, 7 * 24 * 60 * 60, refreshToken);
+  // Queue verification email (async — does not block response)
+  await queueVerificationEmail(email, verifyToken);
 
-  return { user, accessToken, refreshToken };
+  return { user, message: 'Registration successful. Please check your email to verify your account.' };
+}
+
+async function verifyEmail(token) {
+  const userId = await redis.get(`verify:${token}`);
+  if (!userId) throw new ValidationError('Invalid or expired verification token');
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { emailVerified: true },
+  });
+
+  await redis.del(`verify:${token}`);
+
+  return { message: 'Email verified successfully. You can now log in.' };
 }
 
 async function login({ email, password }) {
@@ -64,9 +103,12 @@ async function login({ email, password }) {
   const valid = await bcrypt.compare(password, user.passwordHash);
   if (!valid) throw new UnauthorizedError('Invalid credentials');
 
-  const { accessToken, refreshToken } = generateTokens(user);
+  // Block unverified users
+  if (!user.emailVerified) {
+    throw new UnauthorizedError('Please verify your email before logging in');
+  }
 
-  // Store refresh token in Redis
+  const { accessToken, refreshToken } = generateTokens(user);
   await redis.setex(`refresh:${user.id}`, 7 * 24 * 60 * 60, refreshToken);
 
   return {
@@ -74,6 +116,37 @@ async function login({ email, password }) {
     accessToken,
     refreshToken,
   };
+}
+
+async function forgotPassword(email) {
+  const user = await prisma.user.findUnique({ where: { email } });
+  // Always return success to prevent email enumeration
+  if (!user) return { message: 'If that email exists, a reset link has been sent.' };
+
+  const resetToken = uuidv4();
+  await redis.setex(`reset:${resetToken}`, 60 * 60, user.id); // 1 hour
+
+  await queuePasswordResetEmail(email, resetToken);
+
+  return { message: 'If that email exists, a reset link has been sent.' };
+}
+
+async function resetPassword(token, newPassword) {
+  const userId = await redis.get(`reset:${token}`);
+  if (!userId) throw new ValidationError('Invalid or expired reset token');
+
+  if (newPassword.length < 8) throw new ValidationError('Password must be at least 8 characters');
+
+  const passwordHash = await bcrypt.hash(newPassword, SALT_ROUNDS);
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash },
+  });
+
+  await redis.del(`reset:${token}`);
+
+  return { message: 'Password reset successfully. You can now log in.' };
 }
 
 async function refresh(refreshToken) {
@@ -84,7 +157,6 @@ async function refresh(refreshToken) {
     throw new UnauthorizedError('Invalid or expired refresh token');
   }
 
-  // Check token is still valid in Redis
   const stored = await redis.get(`refresh:${decoded.sub}`);
   if (!stored || stored !== refreshToken) {
     throw new UnauthorizedError('Refresh token has been revoked');
@@ -94,8 +166,6 @@ async function refresh(refreshToken) {
   if (!user) throw new NotFoundError('User not found');
 
   const tokens = generateTokens(user);
-
-  // Rotate refresh token
   await redis.setex(`refresh:${user.id}`, 7 * 24 * 60 * 60, tokens.refreshToken);
 
   return tokens;
@@ -105,4 +175,4 @@ async function logout(userId) {
   await redis.del(`refresh:${userId}`);
 }
 
-module.exports = { register, login, refresh, logout };
+module.exports = { register, verifyEmail, login, forgotPassword, resetPassword, refresh, logout };
